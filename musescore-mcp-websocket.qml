@@ -1,12 +1,17 @@
-import QtQuick 2.9
+import QtQuick
 import MuseScore 3.0
 
 MuseScore {
     id: root
-    menuPath: "Plugins.MuseScore API Server"
-    description: "Exposes MuseScore API via WebSocket (Clean Version)"
-    version: "2.0"
-    
+    title: "MuseScore API Server"
+    description: "Exposes MuseScore API via WebSocket for AI agent control"
+    version: "4.0"
+    categoryCode: "composing-arranging-tools"
+    checkable: true
+    checked: isListening
+
+    property int clientCount: 0
+    property bool isListening: false
     property var clientConnections: []
     property var selectionState: ({
         startStaff: 0,
@@ -150,7 +155,6 @@ MuseScore {
         }
         
         var cursor = curScore.newCursor();
-        cursor.inputStateMode = Cursor.INPUT_STATE_SYNC_WITH_SCORE;
         
         // Set track
         if (params.startStaff !== undefined) cursor.staffIdx = params.startStaff;
@@ -214,7 +218,7 @@ MuseScore {
 
     function processElement(element) {
         if (!element) return null;
-        if (element.name !== "Chord" && element.name !== "Rest") return null;
+        if (element.type != Element.CHORD && element.type != Element.REST) return null;
 
         var base = {
             name: element.name,
@@ -237,7 +241,7 @@ MuseScore {
             }
         }
 
-        if (element.name === "Chord") {
+        if (element.type == Element.CHORD) {
             base.notes = [];
             var notesObj = element.notes || {};
             var keys = Object.keys(notesObj);
@@ -712,12 +716,11 @@ MuseScore {
             var cursor = createCursor();
             cursor.setDuration(params.duration.numerator, params.duration.denominator);
             
-            // Check if current position has a rest
-            var hasRest = selectionState.elements.some(function(element) { 
-                return element.name === "Rest"; 
-            });
-
-            cursor.addNote(params.pitch, !hasRest);
+            // Remove rest at current position before adding note
+            if (cursor.element && cursor.element.type == Element.REST) {
+                removeElement(cursor.element);
+            }
+            cursor.addNote(params.pitch);
             cursor.rewindToTick(selectionState.startTick);
 
             if (params.advanceCursorAfterAction) {
@@ -850,14 +853,14 @@ MuseScore {
             while (cursor.element && lyricsArray.length > 0) {
                 var element = cursor.element;
                 
-                if (element.type === Element.CHORD || element.name === "Chord") {
+                if (element.type == Element.CHORD) {
                     var lyr = newElement(Element.LYRICS);
                     lyr.text = lyricsArray.shift();
                     lyr.verse = verse;
                     
                     cursor.add(lyr);
                     addedCount++;
-                } else if (element.type === Element.REST || element.name === "Rest") {
+                } else if (element.type == Element.REST) {
                     skippedCount++;
                 }
                 
@@ -1119,17 +1122,26 @@ MuseScore {
     // ========================================
 
     onRun: {
-        console.log("Starting MuseScore API Server (Clean Version) on port 8765");
-        
+        console.log("Starting MuseScore API Server on port 8765");
+
+        isListening = true;
+
         api.websocketserver.listen(8765, function(clientId) {
             console.log("Client connected with ID: " + clientId);
             clientConnections.push(clientId);
-            
+            clientCount = clientConnections.length;
+
             api.websocketserver.onMessage(clientId, function(message) {
                 processMessage(message, clientId);
             });
+
+            api.websocketserver.onDisconnect(clientId, function() {
+                console.log("Client disconnected: " + clientId);
+                clientConnections = clientConnections.filter(function(id) { return id !== clientId; });
+                clientCount = clientConnections.length;
+            });
         });
-    
+
         if (curScore) {
             initCursorState();
         }
