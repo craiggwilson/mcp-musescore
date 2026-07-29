@@ -23,7 +23,7 @@ MuseScore {
         port: 8765
         name: "musescore-mcp"
 
-        onErrorStringChanged: {
+        onErrorStringChanged: function(errorString) {
             if (errorString && errorString.length > 0) {
                 console.log("WebSocket server error: " + errorString);
                 // Port already in use — another instance is running, quit.
@@ -136,6 +136,8 @@ MuseScore {
                 return "setStaffMute staff " + p.staff;
             case "setInstrumentSound":
                 return "setInstrumentSound";
+            case "setKeySignature":
+                return "setKeySignature " + (p.fifths !== undefined ? p.fifths + " fifths" : "");
             case "connectToMuseScore":
                 return "connectToMuseScore";
             default:
@@ -185,6 +187,7 @@ MuseScore {
             case "setInstrumentSound":      return setInstrumentSound(command.params);
             case "setTimeSignature":        return setTimeSignature(command.params);
             case "setTempo":                return setTempo(command.params);
+            case "setKeySignature":         return setKeySignature(command.params);
 
             default:
                 throw new Error("Unknown command: " + command.action);
@@ -334,6 +337,56 @@ MuseScore {
         return base;
     }
 
+    function describeAnnotation(element, tick) {
+        if (!element) return null;
+        if (element.type == Element.CHORD || element.type == Element.REST) return null;
+
+        var info = { startTick: tick };
+
+        if (element.type == Element.CLEF) {
+            info.type = "clef";
+            info.clefType = element.clefType;
+        } else if (element.type == Element.KEYSIG) {
+            info.type = "keysig";
+            info.fifths = element.key;
+        } else if (element.type == Element.TIMESIG) {
+            info.type = "timesig";
+            if (element.timesig) {
+                info.numerator = element.timesig.numerator;
+                info.denominator = element.timesig.denominator;
+            }
+        } else if (element.type == Element.TEMPO_TEXT) {
+            info.type = "tempo";
+            info.text = element.text;
+            info.tempo = element.tempo;
+        } else if (element.type == Element.DYNAMIC) {
+            info.type = "dynamic";
+            info.text = element.text;
+        } else if (element.type == Element.ARTICULATION) {
+            info.type = "articulation";
+            info.symbol = element.symbol;
+        } else if (element.type == Element.EXPRESSION || element.type == Element.STAFF_TEXT ||
+                   element.type == Element.SYSTEM_TEXT || element.type == Element.REHEARSAL_MARK ||
+                   element.type == Element.FINGERING || element.type == Element.HARMONY) {
+            info.type = element.name;
+            info.text = element.text;
+        } else if (element.type == Element.BREATH) {
+            info.type = "breath";
+        } else if (element.type == Element.FERMATA) {
+            info.type = "fermata";
+        } else if (element.type == Element.BAR_LINE) {
+            info.type = "barline";
+            info.barlineType = element.barlineType !== undefined ? element.barlineType : element.subType;
+        } else if (element.type == Element.ARPEGGIO) {
+            info.type = "arpeggio";
+            info.subtype = element.subType;
+        } else {
+            return null;
+        }
+
+        return info;
+    }
+
     function undo() {
         return executeWithUndo(function() {
             cmd("undo");
@@ -360,7 +413,7 @@ MuseScore {
             "getCursorInfo", "goToMeasure", "nextElement", "prevElement", "nextStaff", "prevStaff",
             "selectCurrentMeasure", "processSequence", "insertMeasure", "goToFinalMeasure",
             "goToBeginningOfScore", "setTimeSignature", "addLyrics", "addInstrument",
-            "setStaffMute", "setInstrumentSound", "setTempo"
+            "setStaffMute", "setInstrumentSound", "setTempo", "setKeySignature"
         ];
 
         try {
@@ -387,22 +440,32 @@ MuseScore {
 
             if (startSegment && endSegment) {
                 var elementsMap = {};
+                var annotationsList = [];
                 for (var st = selection.startStaff; st < selection.endStaff; st++) {
                     elementsMap["staff" + st] = [];
                 }
 
                 var currentSegment = startSegment;
                 while (currentSegment && currentSegment.tick < endSegment.tick) {
-                    for (var s = selection.startStaff; s < selection.endStaff; s++) {
-                        for (var v = 0; v < 4; v++) {
-                            var track = s * 4 + v;
-                            var el = currentSegment.elementAt(track);
-                            if (el) {
-                                var processed = processElement(el);
-                                if (processed) {
-                                    processed.voice = v;
-                                    processed.startTick = currentSegment.tick;
-                                    elementsMap["staff" + s].push(processed);
+                    var totalTracks = curScore.ntracks || (curScore.nstaves * 4);
+                    for (var track = 0; track < totalTracks; track++) {
+                        var el = currentSegment.elementAt(track);
+                        if (el) {
+                            var stf = Math.floor(track / 4);
+                            var voc = track % 4;
+
+                            var processed = processElement(el);
+                            if (processed) {
+                                processed.voice = voc;
+                                processed.startTick = currentSegment.tick;
+                                if (!elementsMap["staff" + stf]) elementsMap["staff" + stf] = [];
+                                elementsMap["staff" + stf].push(processed);
+                            } else {
+                                var annotation = describeAnnotation(el, currentSegment.tick);
+                                if (annotation) {
+                                    annotation.staff = stf;
+                                    annotation.voice = voc;
+                                    annotationsList.push(annotation);
                                 }
                             }
                         }
@@ -415,6 +478,7 @@ MuseScore {
                     endStaff: selection.endStaff,
                     startTick: startSegment.tick,
                     elements: elementsMap,
+                    annotations: annotationsList,
                     totalDuration: endSegment.tick - startSegment.tick
                 };
             } else {
@@ -1066,6 +1130,27 @@ MuseScore {
         });
     }
 
+    function setKeySignature(params) {
+        var validation = validateParams(params, ["fifths"]);
+        if (!validation.valid) return validation;
+
+        if (params.fifths < -7 || params.fifths > 7)
+            return { error: "fifths must be between -7 and 7" };
+
+        return executeWithUndo(function() {
+            var cursor = curScore.newCursor();
+            cursor.staffIdx = selectionState.startStaff || 0;
+            cursor.voice = 0;
+            cursor.rewindToTick(selectionState.startTick || 0);
+
+            var keySig = newElement(Element.KEYSIG);
+            keySig.concertKey = params.fifths;
+            keySig.key = params.fifths;
+            cursor.add(keySig);
+            return { success: true, message: "Key signature set to " + params.fifths + " fifths" };
+        });
+    }
+
     function getScore(params) {
         if (!curScore) return { error: "No score open" };
 
@@ -1107,7 +1192,8 @@ MuseScore {
                     measure: i + 1,
                     startTick: cursor.tick,
                     numElements: 0,
-                    elements: {}
+                    elements: {},
+                    annotations: []
                 };
 
                 for (var j = 0; j < curScore.nstaves; j++) {
@@ -1128,16 +1214,27 @@ MuseScore {
                         return tick <= currentSegment.tick;
                     }).length - 1;
 
-                    for (var v = 0; v < 4; v++) {
-                        var track = k * 4 + v;
+                    var totalTracks = curScore.ntracks || (curScore.nstaves * 4);
+                    for (var track = 0; track < totalTracks; track++) {
+                        var stf = Math.floor(track / 4);
+                        var voc = track % 4;
                         var el = currentSegment.elementAt(track);
                         if (el) {
-                            score.measures[measureIdx].numElements++;
                             var processedElement = processElement(el);
                             if (processedElement) {
                                 processedElement.startTick = currentSegment.tick;
-                                processedElement.voice = v;
-                                score.measures[measureIdx].elements["staff" + k].push(processedElement);
+                                processedElement.voice = voc;
+                                if (stf === k) {
+                                    score.measures[measureIdx].numElements++;
+                                    score.measures[measureIdx].elements["staff" + k].push(processedElement);
+                                }
+                            } else {
+                                var annotation = describeAnnotation(el, currentSegment.tick);
+                                if (annotation) {
+                                    annotation.staff = stf;
+                                    annotation.voice = voc;
+                                    score.measures[measureIdx].annotations.push(annotation);
+                                }
                             }
                         }
                     }

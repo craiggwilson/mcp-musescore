@@ -143,6 +143,24 @@ class setTimeSignatureAction(TypedDict):
     params: setTimeSignatureParams
 
 
+class setTempoParams(TypedDict):
+    bpm: int
+
+
+class setTempoAction(TypedDict):
+    action: Literal["setTempo"]
+    params: setTempoParams
+
+
+class setKeySignatureParams(TypedDict):
+    fifths: int
+
+
+class setKeySignatureAction(TypedDict):
+    action: Literal["setKeySignature"]
+    params: setKeySignatureParams
+
+
 class undoAction(TypedDict):
     action: Literal["undo"]
     params: Dict[str, Any]
@@ -165,5 +183,6 @@ ActionSequence = List[
     getCursorInfoAction | goToMeasureAction | nextElementAction | 
     prevElementAction | selectCurrentMeasureAction | insertMeasureAction | 
     goToFinalMeasureAction | goToBeginningOfScoreAction | setTimeSignatureAction | 
+    setTempoAction | setKeySignatureAction |
     undoAction | nextStaffAction | prevStaffAction
 ]
